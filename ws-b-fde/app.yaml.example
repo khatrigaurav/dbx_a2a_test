@@ -1,0 +1,34 @@
+# Copy this file to `app.yaml` and fill in your values before deploying the FDE app.
+# `app.yaml` is gitignored so you never commit the SP secret.
+command:
+  - sh
+  - "-c"
+  - "uvicorn app:app --host 0.0.0.0 --port ${DATABRICKS_APP_PORT:-8080}"
+env:
+  # --- Target workspace (WS A) ---
+  - name: WS_A_HOST                      # target workspace base URL (OIDC token + Jobs API live here)
+    value: "https://<TARGET_WORKSPACE>.cloud.databricks.com"
+  - name: WS_A_APP_URL                   # the deployed GTM agent app URL
+    value: "https://<gtm-agent-xxxx>.aws.databricksapps.com"
+  - name: WS_A_JOB_ID                    # the notebook job id created in WS A
+    value: "<NOTEBOOK_JOB_ID>"
+
+  # --- UC connections (created in the CALLER's metastore) ---
+  - name: CONNECTION_NAME                # UC HTTP connection -> GTM agent app host
+    value: "m2m_connection_fde_gtm"
+  - name: CONNECTION_NAME_JOBS           # UC HTTP connection -> WS A workspace host (Jobs API)
+    value: "m2m_connection_fde_jobs"
+
+  # --- M2M service principal (exists in WS A, creds stored in the connections above) ---
+  - name: M2M_CLIENT_ID                  # SP application/client id
+    value: "<M2M_SP_CLIENT_ID>"
+  - name: M2M_CLIENT_SECRET              # SP OAuth secret. PREFER a Databricks secret scope (valueFrom) in real use.
+    value: "<M2M_SP_SECRET>"
+
+  # --- U2M OAuth (account-level app connection registered in WS A's account) ---
+  - name: U2M_CLIENT_ID                  # the app connection's client_id (public / PKCE)
+    value: "<OAUTH_APP_CONNECTION_CLIENT_ID>"
+
+  # --- This app's own public URL (must match the redirect URL registered on the app connection) ---
+  - name: FDE_APP_URL
+    value: "https://<this-fde-app-xxxx>.aws.databricksapps.com"

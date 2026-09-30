@@ -1,0 +1,134 @@
+"""GTM agent — the TARGET and A2A SERVER (deploy to Workspace A).
+
+Endpoints:
+  GET      /                     health
+  GET|POST /api/whoami           echoes the identity the request arrived with
+  GET|POST /api/gtm-summary      a personalized "GTM brief" (labels caller user vs SP)
+  GET      /.well-known/agent.json   A2A Agent Card (self-configuring from request/env)
+  POST     /a2a                  A2A JSON-RPC message/send -> Task + Artifact
+
+Identity comes from the Databricks Apps X-Forwarded-* headers, so the reply is
+personalized to WHO called: a real user (U2M) or a service principal (M2M).
+No hardcoded URLs — the Agent Card derives its endpoints from the request host and
+the injected DATABRICKS_HOST (override with SELF_URL if you need to).
+"""
+from fastapi import FastAPI, Request
+from datetime import datetime, timezone
+import base64, json, os, uuid
+
+app = FastAPI()
+
+
+def _peek_jwt(token):
+    """Best-effort decode of a JWT payload (no verification) for inspection."""
+    try:
+        p = token.split(".")[1]
+        p += "=" * (-len(p) % 4)
+        c = json.loads(base64.urlsafe_b64decode(p))
+        return {k: c.get(k) for k in ("sub", "aud", "iss", "scope", "exp")}
+    except Exception as e:
+        return {"decode_error": str(e)}
+
+
+def _identity(request: Request):
+    name = (request.headers.get("X-Forwarded-Preferred-Username")
+            or request.headers.get("X-Forwarded-Email") or "unknown caller")
+    tok = request.headers.get("X-Forwarded-Access-Token")
+    sub = _peek_jwt(tok).get("sub") if tok else None
+    # A user's token subject is an email; a service principal's is a client-id UUID.
+    ptype = "user" if (sub and "@" in str(sub)) else "service principal"
+    return name, sub, ptype
+
+
+@app.get("/")
+def root():
+    return {"status": "GTM agent (A2A server) is running"}
+
+
+@app.api_route("/api/whoami", methods=["GET", "POST"])
+async def whoami(request: Request):
+    fwd = {k: v for k, v in request.headers.items() if k.lower().startswith("x-forwarded")}
+    tok = request.headers.get("X-Forwarded-Access-Token")
+    result = {
+        "message": "GTM agent saw this identity",
+        "forwarded_email": request.headers.get("X-Forwarded-Email"),
+        "forwarded_token_claims": _peek_jwt(tok) if tok else None,
+        "all_x_forwarded_headers": fwd,
+    }
+    print(result, flush=True)
+    return result
+
+
+@app.api_route("/api/gtm-summary", methods=["GET", "POST"])
+async def gtm_summary(request: Request):
+    name, sub, ptype = _identity(request)
+    result = {
+        "agent": "GTM Insights Agent",
+        "served_for": name,
+        "principal_type": ptype,
+        "authenticated_sub": sub,
+        "message": f"Hi {name} — your GTM brief: 3 open opps, 2 renewals due this quarter, pipeline +12% WoW.",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    print(result, flush=True)
+    return result
+
+
+# --------------------------- A2A ---------------------------
+def _agent_card(request: Request):
+    host = request.headers.get("x-forwarded-host") or request.url.netloc
+    self_url = (os.environ.get("SELF_URL") or f"https://{host}").rstrip("/")
+    ws_host = os.environ.get("DATABRICKS_HOST", host).rstrip("/")
+    if not ws_host.startswith("http"):
+        ws_host = f"https://{ws_host}"
+    return {
+        "protocolVersion": "0.2.0",
+        "name": "GTM Insights Agent",
+        "description": "Answers go-to-market questions: account briefs, pipeline, renewals.",
+        "url": f"{self_url}/a2a",
+        "version": "1.0.0",
+        "capabilities": {"streaming": False, "pushNotifications": False},
+        "defaultInputModes": ["text/plain"],
+        "defaultOutputModes": ["text/plain", "application/json"],
+        "securitySchemes": {"oauth": {"type": "oauth2", "flows": {"clientCredentials": {
+            "tokenUrl": f"{ws_host}/oidc/v1/token", "scopes": {"all-apis": "Full workspace API access"}}}}},
+        "security": [{"oauth": ["all-apis"]}],
+        "skills": [{
+            "id": "account-brief", "name": "Account Brief",
+            "description": "Generate a personalized GTM brief for the caller.",
+            "tags": ["gtm", "sales"], "examples": ["Give me my GTM brief"],
+            "inputModes": ["text/plain"], "outputModes": ["application/json"],
+        }],
+    }
+
+
+@app.get("/.well-known/agent.json")
+def agent_card(request: Request):
+    """A2A discovery document — who this agent is, its skills, and how to authenticate."""
+    return _agent_card(request)
+
+
+@app.post("/a2a")
+async def a2a(request: Request):
+    """Minimal A2A JSON-RPC endpoint: message/send -> a completed Task with an Artifact."""
+    body = await request.json()
+    rid = body.get("id")
+    if body.get("method") != "message/send":
+        return {"jsonrpc": "2.0", "id": rid,
+                "error": {"code": -32601, "message": f"unsupported method: {body.get('method')}"}}
+
+    parts = body.get("params", {}).get("message", {}).get("parts", [])
+    prompt = " ".join(p.get("text", "") for p in parts if p.get("kind") == "text") or "(no text)"
+    name, sub, ptype = _identity(request)
+    now = datetime.now(timezone.utc).isoformat()
+    brief = (f"Hi {name} — GTM brief for '{prompt}': 3 open opps, 2 renewals due this "
+             f"quarter, pipeline +12% WoW.")
+    print(f"A2A message/send from {name} ({ptype}): {prompt}", flush=True)
+    return {"jsonrpc": "2.0", "id": rid, "result": {
+        "id": str(uuid.uuid4()), "contextId": str(uuid.uuid4()),
+        "status": {"state": "completed", "timestamp": now},
+        "artifacts": [{"artifactId": str(uuid.uuid4()), "name": "gtm-brief", "parts": [
+            {"kind": "text", "text": brief},
+            {"kind": "data", "data": {"served_for": name, "principal_type": ptype,
+                                      "received_prompt": prompt, "generated_at": now}}]}],
+        "kind": "task"}}

@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cross-workspace U2M (OAuth) — how it works</title>
+<style>
+  :root{--ink:#0f172a;--muted:#64748b;--line:#cbd5e1;--front:#2563eb;--back:#059669;--bg:#f8fafc;--card:#fff;--warn:#c2410c}
+  *{box-sizing:border-box}
+  body{font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:var(--ink);background:var(--bg);margin:0;padding:28px}
+  .wrap{max-width:1120px;margin:0 auto}
+  h1{font-size:22px;margin:0 0 4px}
+  .sub{color:var(--muted);margin:0 0 18px;font-size:14px}
+  .legend{display:flex;gap:18px;flex-wrap:wrap;font-size:13px;margin:10px 0 6px}
+  .legend span{display:inline-flex;align-items:center;gap:6px}
+  .sw{width:22px;height:0;border-top:3px solid}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px;margin:14px 0;box-shadow:0 1px 2px rgba(0,0,0,.04)}
+  ol{margin:6px 0 0;padding-left:22px}
+  li{margin:6px 0;font-size:14px;line-height:1.45}
+  code{background:#eef2f7;padding:1px 5px;border-radius:5px;font-size:12.5px}
+  .fc{color:var(--front);font-weight:600}
+  .bc{color:var(--back);font-weight:600}
+  .grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px}
+  .mode{border:1px solid var(--line);border-radius:10px;padding:12px;font-size:13px}
+  .mode h3{margin:0 0 6px;font-size:14px}
+  .ok{color:var(--back);font-weight:700}.bad{color:#dc2626;font-weight:700}
+  .note{background:#fff7ed;border:1px solid #fed7aa;border-radius:10px;padding:12px;font-size:13px;color:#7c2d12}
+  svg{width:100%;height:auto;display:block}
+  .t{font:12px -apple-system,Segoe UI,Roboto,sans-serif}
+  .tb{font:600 13px -apple-system,Segoe UI,Roboto,sans-serif}
+  .tm{font:11px -apple-system,Segoe UI,Roboto,sans-serif;fill:#334155}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Cross-workspace U2M via OAuth app connection</h1>
+  <p class="sub">How the FDE app (Workspace B) gets a token that Workspace A accepts <b>as the real user</b> — the flow behind buttons 5 &amp; 6.</p>
+
+  <div class="legend">
+    <span><span class="sw" style="border-color:var(--front)"></span> <b class="fc">Front-channel</b> — through the user's browser (needs login UI + WS&nbsp;A cookies)</span>
+    <span><span class="sw" style="border-color:var(--back)"></span> <b class="bc">Back-channel</b> — server-to-server HTTP from the FDE app</span>
+  </div>
+
+  <div class="card">
+  <svg viewBox="0 0 1120 640" role="img" aria-label="OAuth sequence diagram">
+    <defs>
+      <marker id="aF" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#2563eb"/></marker>
+      <marker id="aB" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#059669"/></marker>
+    </defs>
+
+    <!-- actor boxes -->
+    <g>
+      <rect x="55" y="24" width="170" height="46" rx="9" fill="#eff6ff" stroke="#bfdbfe"/>
+      <text x="140" y="46" text-anchor="middle" class="tb">User's browser</text>
+      <text x="140" y="62" text-anchor="middle" class="tm">(you)</text>
+
+      <rect x="345" y="24" width="180" height="46" rx="9" fill="#f0fdf4" stroke="#bbf7d0"/>
+      <text x="435" y="46" text-anchor="middle" class="tb">FDE app</text>
+      <text x="435" y="62" text-anchor="middle" class="tm">Workspace B (caller)</text>
+
+      <rect x="620" y="24" width="200" height="46" rx="9" fill="#fef2f2" stroke="#fecaca"/>
+      <text x="720" y="46" text-anchor="middle" class="tb">WS A · OIDC</text>
+      <text x="720" y="62" text-anchor="middle" class="tm">/authorize + /token</text>
+
+      <rect x="905" y="24" width="170" height="46" rx="9" fill="#faf5ff" stroke="#e9d5ff"/>
+      <text x="990" y="46" text-anchor="middle" class="tb">GTM app</text>
+      <text x="990" y="62" text-anchor="middle" class="tm">Workspace A (target)</text>
+    </g>
+
+    <!-- lifelines -->
+    <g stroke="#cbd5e1" stroke-dasharray="4 5">
+      <line x1="140" y1="70" x2="140" y2="620"/>
+      <line x1="435" y1="70" x2="435" y2="620"/>
+      <line x1="720" y1="70" x2="720" y2="620"/>
+      <line x1="990" y1="70" x2="990" y2="620"/>
+    </g>
+
+    <!-- steps: front-channel = blue, back-channel = green -->
+    <!-- 1 B->F -->
+    <line x1="140" y1="110" x2="431" y2="110" stroke="#2563eb" stroke-width="2" marker-end="url(#aF)"/>
+    <text x="287" y="104" text-anchor="middle" class="t" fill="#2563eb">① click button 5 → GET /oauth/start</text>
+    <!-- 2 F->B -->
+    <line x1="435" y1="155" x2="144" y2="155" stroke="#2563eb" stroke-width="2" marker-end="url(#aF)"/>
+    <text x="287" y="149" text-anchor="middle" class="t" fill="#2563eb">② 307 → WS A /authorize (client_id, redirect_uri, PKCE challenge, state)</text>
+    <!-- 3 B->O -->
+    <line x1="140" y1="200" x2="716" y2="200" stroke="#2563eb" stroke-width="2" marker-end="url(#aF)"/>
+    <text x="430" y="194" text-anchor="middle" class="t" fill="#2563eb">③ GET /authorize — user logs in &amp; consents at WS A</text>
+    <!-- 4 O->B -->
+    <line x1="720" y1="245" x2="144" y2="245" stroke="#2563eb" stroke-width="2" marker-end="url(#aF)"/>
+    <text x="430" y="239" text-anchor="middle" class="t" fill="#2563eb">④ 302 → /oauth/callback?code  (only to the REGISTERED redirect_uri)</text>
+    <!-- 5 B->F -->
+    <line x1="140" y1="290" x2="431" y2="290" stroke="#2563eb" stroke-width="2" marker-end="url(#aF)"/>
+    <text x="287" y="284" text-anchor="middle" class="t" fill="#2563eb">⑤ GET /oauth/callback?code</text>
+    <!-- 6 F->O back -->
+    <line x1="435" y1="345" x2="716" y2="345" stroke="#059669" stroke-width="2" marker-end="url(#aB)"/>
+    <text x="577" y="339" text-anchor="middle" class="t" fill="#059669">⑥ POST /token — code + PKCE code_verifier</text>
+    <!-- 7 O->F back -->
+    <line x1="720" y1="390" x2="439" y2="390" stroke="#059669" stroke-width="2" marker-end="url(#aB)"/>
+    <text x="577" y="384" text-anchor="middle" class="t" fill="#059669">⑦ WS-A-issued USER access token</text>
+    <!-- 8 F->G back -->
+    <line x1="435" y1="435" x2="986" y2="435" stroke="#059669" stroke-width="2" marker-end="url(#aB)"/>
+    <text x="710" y="429" text-anchor="middle" class="t" fill="#059669">⑧ GET /api/gtm-summary — Authorization: Bearer &lt;token&gt;</text>
+    <!-- 9 G->F back -->
+    <line x1="990" y1="480" x2="439" y2="480" stroke="#059669" stroke-width="2" marker-end="url(#aB)"/>
+    <text x="710" y="474" text-anchor="middle" class="t" fill="#059669">⑨ 200 { served_for: "Gaurav", principal_type: "user" }</text>
+    <!-- 10 F->B front -->
+    <line x1="435" y1="525" x2="144" y2="525" stroke="#2563eb" stroke-width="2" marker-end="url(#aF)"/>
+    <text x="287" y="519" text-anchor="middle" class="t" fill="#2563eb">⑩ render banner — “served for the real user”</text>
+
+    <!-- app connection note -->
+    <rect x="600" y="558" width="475" height="58" rx="9" fill="#fff7ed" stroke="#fed7aa"/>
+    <text x="612" y="578" class="tm" fill="#7c2d12"><tspan font-weight="700">App connection</tspan> (registered in WS A's account, by an account admin):</text>
+    <text x="612" y="595" class="tm" fill="#7c2d12">• client_id identifies the caller  • allowed redirect_uri is the whitelist checked at ③/④</text>
+    <text x="612" y="610" class="tm" fill="#7c2d12">• public / PKCE client → no secret; code_verifier proves the caller at ⑥</text>
+  </svg>
+  </div>
+
+  <div class="card">
+    <b>Step-by-step</b>
+    <ol>
+      <li><span class="fc">①</span> You click <b>App · U2M (OAuth)</b> → browser hits the FDE app's <code>/oauth/start</code>.</li>
+      <li><span class="fc">②</span> FDE app doesn't call anything — it returns a <code>307</code> telling the browser to go to <b>WS A</b>'s <code>/oidc/v1/authorize</code>, carrying the <code>client_id</code>, <code>redirect_uri</code>, requested <code>scope</code>, a random <code>state</code>, and a PKCE <code>code_challenge</code>.</li>
+      <li><span class="fc">③</span> The <b>browser</b> calls WS A's authorize endpoint. WS A shows login/consent (using the browser's WS-A session), and checks the <code>redirect_uri</code> against the app connection's registered list.</li>
+      <li><span class="fc">④</span> WS A redirects the browser back to the FDE app's <code>/oauth/callback</code> with a short-lived <code>code</code> — and <b>only</b> to the pre-registered URL.</li>
+      <li><span class="fc">⑤</span> Browser delivers the <code>code</code> to the FDE app.</li>
+      <li><span class="bc">⑥</span> FDE app (server-side) <b>POST</b>s the <code>code</code> + PKCE <code>code_verifier</code> to WS A's <code>/oidc/v1/token</code>.</li>
+      <li><span class="bc">⑦</span> WS A returns a <b>WS-A-issued user access token</b> (<code>iss/aud = WS A</code>).</li>
+      <li><span class="bc">⑧</span> FDE app calls the GTM app's <code>/api/gtm-summary</code> with that token.</li>
+      <li><span class="bc">⑨</span> Because the token was minted by WS A, WS A accepts it and the GTM app sees the <b>real user</b>.</li>
+      <li><span class="fc">⑩</span> FDE app renders the result banner.</li>
+    </ol>
+  </div>
+
+  <b>Why this is different from the other two buttons</b>
+  <div class="grid" style="margin-top:8px">
+    <div class="mode"><h3>M2M (buttons 1, 3)</h3>
+      A <b>service principal</b> gets a token from WS A via client-credentials (wrapped in a UC connection). WS A sees the <b>SP</b>, not a human. <span class="ok">Works cross-workspace.</span></div>
+    <div class="mode"><h3>U2M — forward (2, 4)</h3>
+      Reuse the user's <b>WS-B</b> token against WS A. Its <code>iss/aud</code> are WS-B → WS A rejects it. <span class="bad">401 / Invalid Token.</span></div>
+    <div class="mode"><h3>U2M — OAuth (5, 6)</h3>
+      User logs in <b>directly to WS A</b>, so WS A mints the token. WS A accepts it and sees the real user. <span class="ok">Works cross-workspace.</span></div>
+  </div>
+
+  <div class="note" style="margin-top:14px">
+    <b>The crux:</b> a token is only accepted by the workspace that <i>minted</i> it. Forwarding reuses the wrong workspace's token (fails); the OAuth flow makes <b>WS&nbsp;A itself</b> mint a fresh token for the user (works) — which is only possible because the app connection's <code>client_id</code> and <code>redirect_uri</code> are registered in <b>WS A's account</b>.
+  </div>
+</div>
+</body>
+</html>
