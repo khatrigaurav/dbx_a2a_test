@@ -90,8 +90,15 @@ def _agent_card(request: Request):
         "capabilities": {"streaming": False, "pushNotifications": False},
         "defaultInputModes": ["text/plain"],
         "defaultOutputModes": ["text/plain", "application/json"],
-        "securitySchemes": {"oauth": {"type": "oauth2", "flows": {"clientCredentials": {
-            "tokenUrl": f"{ws_host}/oidc/v1/token", "scopes": {"all-apis": "Full workspace API access"}}}}},
+        "securitySchemes": {"oauth": {"type": "oauth2", "flows": {
+            "clientCredentials": {  # M2M — a service principal acts as itself (buttons 1, 3, 7)
+                "tokenUrl": f"{ws_host}/oidc/v1/token",
+                "scopes": {"all-apis": "Full workspace API access"}},
+            "authorizationCode": {  # U2M — on behalf of a logged-in user (buttons 5, 6, 8)
+                "authorizationUrl": f"{ws_host}/oidc/v1/authorize",
+                "tokenUrl": f"{ws_host}/oidc/v1/token",
+                "scopes": {"all-apis": "Full workspace API access"}},
+        }}},
         "security": [{"oauth": ["all-apis"]}],
         "skills": [{
             "id": "account-brief", "name": "Account Brief",
