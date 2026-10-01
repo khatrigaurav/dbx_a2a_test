@@ -1,6 +1,6 @@
 """FDE app — the CALLER (deploy to Workspace B). Config comes entirely from env (see app.yaml).
 
-Eight buttons that reach the target workspace (WS A):
+Ten buttons that reach the target workspace (WS A):
 
   1. App      · M2M                -> UC connection proxy -> gtm-agent /api/gtm-summary
   2. App      · U2M (forward)      -> reuse this user's WS-B token -> WS A app   (FAILS 401)
@@ -10,9 +10,11 @@ Eight buttons that reach the target workspace (WS A):
   6. Notebook · U2M (OAuth)        -> authz-code login to WS A -> run-now as user  (works)
   7. A2A      · as service principal -> discover Agent Card + message/send via UC connection
   8. A2A      · as the real user     -> discover Agent Card + message/send via U2M OAuth
+  9. A2A revenue-sum · as SP         -> agent runs SELECT as its OWN SP (sees ALL rows)
+ 10. A2A revenue-sum · as the user   -> agent runs SELECT as YOU via actingUserToken (RLS: your rows)
 
-Buttons 1-4 and 7 use fetch and render inline. 5, 6, 8 need a browser redirect (OAuth),
-so they navigate the tab and the callback renders the result with a back link.
+Buttons 1-4, 7, 9 use fetch and render inline. 5, 6, 8, 10 need a browser redirect
+(OAuth), so they navigate the tab and the callback renders the result with a back link.
 """
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
@@ -54,7 +56,7 @@ def call_target(target, bearer):
     return {"http_status": r.status_code, "body": body}
 
 
-def a2a_call_direct(bearer):
+def a2a_call_direct(bearer, prompt="Give me my GTM brief"):
     """A2A client using a given bearer token DIRECTLY against WS A (no UC connection):
     discover the Agent Card, then message/send to the card's advertised url."""
     h = {"Authorization": f"Bearer {bearer}"}
@@ -64,9 +66,12 @@ def a2a_call_direct(bearer):
     except Exception:
         card = card_r.text
     a2a_url = card.get("url") if isinstance(card, dict) else f"{WS_A_APP}/a2a"
+    # Pass the user's FULL token in the message metadata so the agent can act as the user
+    # for scope-requiring work (the ingress-forwarded token is identity-only). See README.
     rpc = {"jsonrpc": "2.0", "id": "1", "method": "message/send",
            "params": {"message": {"role": "user", "messageId": str(uuid.uuid4()),
-                                   "parts": [{"kind": "text", "text": "Give me my GTM brief"}]}}}
+                                   "parts": [{"kind": "text", "text": prompt}]},
+                      "metadata": {"actingUserToken": bearer}}}
     call_r = requests.post(a2a_url, headers={**h, "Content-Type": "application/json"}, json=rpc, timeout=30)
     try:
         resp = call_r.json()
@@ -107,6 +112,8 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>WS B -> WS A aut
  <a class="btn oauth" href="/oauth/start?target=notebook">6 · Notebook · U2M (OAuth)</a>
  <button onclick="a2a()" style="grid-column:1 / -1;border-color:#7c3aed;background:#f5f3ff">7 · A2A — discover + call as SERVICE PRINCIPAL (via UC connection)</button>
  <a class="btn oauth" href="/oauth/start?target=a2a" style="grid-column:1 / -1;border-color:#7c3aed;background:#faf5ff">8 · A2A — discover + call as the REAL USER (U2M OAuth)</a>
+ <button onclick="rev()" style="grid-column:1 / -1;border-color:#0891b2;background:#ecfeff">9 · A2A revenue-sum — as SERVICE PRINCIPAL (sees ALL rows)</button>
+ <a class="btn" href="/oauth/start?target=a2arev" style="grid-column:1 / -1;border-color:#0891b2;background:#ecfeff">10 · A2A revenue-sum — as the REAL USER (sees only YOUR rows)</a>
 </div>
 <div id=banner style="font-size:16px;font-weight:600;margin:10px 0;min-height:22px"></div>
 <pre id=out>Click a button…</pre>
@@ -130,6 +137,8 @@ async function fwd(t){banner.textContent='';out.textContent='forwarding this use
  const r=await fetch('/u2m/forward?target='+t);show(await r.json());}
 async function a2a(){banner.textContent='';out.textContent='discovering Agent Card + calling via A2A…';
  const r=await fetch('/a2a/demo',{method:'POST'});show(await r.json());}
+async function rev(){banner.textContent='';out.textContent='A2A revenue-sum via connection (as service principal)...';
+ const r=await fetch('/a2a/revenue',{method:'POST'});show(await r.json());}
 </script></body></html>"""
 
 
@@ -166,8 +175,7 @@ def call_m2m(target: str):
             "result": {"http_status": r.status_code, "body": body}}
 
 
-@app.post("/a2a/demo")
-def a2a_demo():
+def _a2a_via_conn(prompt):
     """A2A client: discover the GTM agent's Agent Card, then call message/send —
     both hops through the governed M2M UC connection (agent acts as its SP)."""
     auth = WorkspaceClient().config.authenticate()
@@ -183,7 +191,7 @@ def a2a_demo():
     # 2) CALL: JSON-RPC message/send to the agent
     rpc = {"jsonrpc": "2.0", "id": "1", "method": "message/send",
            "params": {"message": {"role": "user", "messageId": str(uuid.uuid4()),
-                                   "parts": [{"kind": "text", "text": "Give me my GTM brief"}]}}}
+                                   "parts": [{"kind": "text", "text": prompt}]}}}
     call_r = requests.post(f"{base}/a2a", headers={**auth, "Content-Type": "application/json"},
                            json=rpc, timeout=30)
     try:
@@ -200,6 +208,18 @@ def a2a_demo():
                 "card_http": card_r.status_code},
             "a2a_call_http": call_r.status_code,
             "agent_response": resp}
+
+
+@app.post("/a2a/demo")
+def a2a_demo():
+    return _a2a_via_conn("Give me my GTM brief")
+
+
+@app.post("/a2a/revenue")
+def a2a_revenue():
+    """A2A revenue-sum via the UC connection: the agent runs the SQL as its OWN SP,
+    so row-level security shows ALL rows."""
+    return _a2a_via_conn("Sum of revenue")
 
 
 @app.get("/u2m/forward")
@@ -252,16 +272,15 @@ def oauth_callback(request: Request, code: str = "", state: str = "", error: str
     user_tok = tr.json().get("access_token")
     target = ctx["t"]
 
-    if target == "a2a":
-        a2a = a2a_call_direct(user_tok) if user_tok else {"error": "token_exchange_failed", "detail": tr.text[:300]}
+    if target in ("a2a", "a2arev"):
+        prompt = "Sum of revenue" if target == "a2arev" else "Give me my GTM brief"
+        a2a = a2a_call_direct(user_tok, prompt) if user_tok else {"error": "token_exchange_failed", "detail": tr.text[:300]}
         out = {"mode": "A2A as the real user (U2M OAuth)",
                "logged_in_to_WS_A_as_real_user": bool(user_tok), **a2a}
         try:
             parts = a2a["agent_response"]["result"]["artifacts"][0]["parts"]
             txt = next(p["text"] for p in parts if p.get("kind") == "text")
-            data = next(p["data"] for p in parts if p.get("kind") == "data")
-            banner = (f"✅ A2A as USER — discovered '{a2a['discovered'].get('name')}' → {txt}  "
-                      f"(served_for: {data.get('served_for')} / {data.get('principal_type')})")
+            banner = f"✅ A2A as USER — discovered '{a2a['discovered'].get('name')}' → {txt}"
         except Exception:
             banner = f"A2A call HTTP {a2a.get('a2a_call_http')}"
         return HTMLResponse(f"<h3>{banner}</h3><pre>{json.dumps(out, indent=2)}</pre><a href='/'>&larr; back</a>")

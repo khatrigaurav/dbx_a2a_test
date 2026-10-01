@@ -2,3 +2,10 @@ command:
   - sh
   - "-c"
   - "uvicorn app:app --host 0.0.0.0 --port ${DATABRICKS_APP_PORT:-8080}"
+env:
+  # Required ONLY for the optional `revenue-sum` skill (row-level-security demo).
+  # Leave unset to run just the account-brief skill + the auth-boundary buttons.
+  - name: WAREHOUSE_ID                    # a SQL warehouse id in this (WS A) workspace
+    value: "<SQL_WAREHOUSE_ID>"
+  - name: SALES_TABLE                     # UC table with row-level security, e.g. catalog.schema.sales
+    value: "<CATALOG.SCHEMA.sales>"
