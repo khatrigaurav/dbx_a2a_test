@@ -19,8 +19,8 @@ Buttons 1-4, 7, 9 use fetch and render inline. 5, 6, 8, 10 need a browser redire
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from databricks.sdk import WorkspaceClient
-import os, json, secrets, hashlib, base64, requests, uuid
-from urllib.parse import urlencode
+from databricks.sdk.oauth import OAuthClient, Consent
+import os, json, base64, requests, uuid
 
 app = FastAPI()
 
@@ -38,7 +38,18 @@ FDE_APP_URL       = os.environ.get("FDE_APP_URL", "").rstrip("/")
 _b = os.environ.get("DATABRICKS_HOST", "").rstrip("/")
 WS_B_HOST = _b if _b.startswith("http") else f"https://{_b}"
 
-PENDING = {}  # state -> {code_verifier, target}
+# U2M OAuth is handled by the Databricks SDK's OAuthClient/Consent helper: it builds the PKCE
+# challenge + state, the /authorize URL, and does the /token exchange for us — the same wire flow
+# as before (see oauth-flow-diagram.html), just not hand-rolled. Built lazily so an unset
+# U2M_CLIENT_ID (and the OIDC discovery call it makes) never blocks app startup.
+_oauth_client = None
+def _get_oauth_client():
+    global _oauth_client
+    if _oauth_client is None:
+        _oauth_client = OAuthClient(host=WS_A_HOST, client_id=U2M_CLIENT_ID,
+                                    redirect_url=f"{FDE_APP_URL}/oauth/callback",
+                                    scopes=["all-apis", "offline_access"])
+    return _oauth_client
 
 
 def call_target(target, bearer):
@@ -238,23 +249,18 @@ def u2m_forward(request: Request, target: str = "app"):
 def oauth_start(target: str = "app"):
     if not U2M_CLIENT_ID:
         return JSONResponse({"error": "U2M_CLIENT_ID not set"})
-    verifier = secrets.token_urlsafe(64)
-    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
-    state = secrets.token_urlsafe(24)
-    q = urlencode({"response_type": "code", "client_id": U2M_CLIENT_ID,
-                   "redirect_uri": f"{FDE_APP_URL}/oauth/callback",
-                   "scope": "all-apis offline_access", "state": state,
-                   "code_challenge": challenge, "code_challenge_method": "S256"})
-    resp = RedirectResponse(f"{WS_A_HOST}/oidc/v1/authorize?{q}")
-    # Carry PKCE verifier + state in a cookie, NOT server memory, so the callback
+    consent = _get_oauth_client().initiate_consent()   # SDK builds PKCE challenge + state + /authorize URL
+    resp = RedirectResponse(consent.auth_url)
+    # Carry the consent (PKCE verifier + state) in a cookie, NOT server memory, so the callback
     # survives app restarts / multiple replicas. SameSite=Lax so it rides the redirect back.
-    ctx = base64.urlsafe_b64encode(json.dumps({"v": verifier, "t": target, "s": state}).encode()).decode()
+    # consent.as_dict() is JSON-serializable; we tack on our own `target` for post-login routing.
+    ctx = base64.urlsafe_b64encode(json.dumps({"consent": consent.as_dict(), "t": target}).encode()).decode()
     resp.set_cookie("oauth_ctx", ctx, max_age=600, httponly=True, secure=True, samesite="lax", path="/")
     return resp
 
 
 @app.get("/oauth/callback", response_class=HTMLResponse)
-def oauth_callback(request: Request, code: str = "", state: str = "", error: str = ""):
+def oauth_callback(request: Request):
     raw = request.cookies.get("oauth_ctx")
     ctx = None
     if raw:
@@ -262,19 +268,20 @@ def oauth_callback(request: Request, code: str = "", state: str = "", error: str
             ctx = json.loads(base64.urlsafe_b64decode(raw))
         except Exception:
             ctx = None
-    if error or not ctx or ctx.get("s") != state:
-        return HTMLResponse(f"<pre>OAuth problem: error={error} cookie_present={bool(raw)} "
-                            f"state_match={bool(ctx and ctx.get('s') == state)}</pre><a href='/'>back</a>")
-    tr = requests.post(f"{WS_A_HOST}/oidc/v1/token",
-                       data={"grant_type": "authorization_code", "code": code,
-                             "redirect_uri": f"{FDE_APP_URL}/oauth/callback",
-                             "client_id": U2M_CLIENT_ID, "code_verifier": ctx["v"]}, timeout=30)
-    user_tok = tr.json().get("access_token")
+    if not ctx:
+        return HTMLResponse(f"<pre>OAuth problem: cookie_present={bool(raw)}</pre><a href='/'>back</a>")
+    try:
+        consent = Consent.from_dict(_get_oauth_client(), ctx["consent"])
+        # exchange_callback_parameters validates `state` and does the PKCE /token exchange for us.
+        creds = consent.exchange_callback_parameters(dict(request.query_params))
+        user_tok = creds.token().access_token
+    except Exception as e:
+        return HTMLResponse(f"<pre>OAuth exchange failed: {e}</pre><a href='/'>back</a>")
     target = ctx["t"]
 
     if target in ("a2a", "a2arev"):
         prompt = "Sum of revenue" if target == "a2arev" else "Give me my GTM brief"
-        a2a = a2a_call_direct(user_tok, prompt) if user_tok else {"error": "token_exchange_failed", "detail": tr.text[:300]}
+        a2a = a2a_call_direct(user_tok, prompt) if user_tok else {"error": "no access token returned"}
         out = {"mode": "A2A as the real user (U2M OAuth)",
                "logged_in_to_WS_A_as_real_user": bool(user_tok), **a2a}
         try:
@@ -285,7 +292,7 @@ def oauth_callback(request: Request, code: str = "", state: str = "", error: str
             banner = f"A2A call HTTP {a2a.get('a2a_call_http')}"
         return HTMLResponse(f"<h3>{banner}</h3><pre>{json.dumps(out, indent=2)}</pre><a href='/'>&larr; back</a>")
 
-    proper = call_target(target, user_tok) if user_tok else {"token_exchange_failed": tr.text[:300]}
+    proper = call_target(target, user_tok) if user_tok else {"error": "no access token returned"}
     out = {"mode": "U2M (proper OAuth via app connection)", "target": target,
            "logged_in_to_WS_A_as_real_user": bool(user_tok), "result": proper}
     body = proper.get("body") if isinstance(proper, dict) else None

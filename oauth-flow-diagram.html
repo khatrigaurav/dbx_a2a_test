@@ -34,7 +34,7 @@
 <body>
 <div class="wrap">
   <h1>Cross-workspace U2M via OAuth app connection</h1>
-  <p class="sub">How the FDE app (Workspace B) gets a token that Workspace A accepts <b>as the real user</b> — the flow behind buttons 5 &amp; 6.</p>
+  <p class="sub">How the FDE app (Workspace B) gets a token that Workspace A accepts <b>as the real user</b> — the flow behind buttons 5 &amp; 6. The FDE app drives this with the Databricks SDK's <code>OAuthClient</code>/<code>Consent</code> helper, which performs the PKCE steps below on its behalf — the <b>wire flow is unchanged</b>, just not hand-rolled.</p>
 
   <div class="legend">
     <span><span class="sw" style="border-color:var(--front)"></span> <b class="fc">Front-channel</b> — through the user's browser (needs login UI + WS&nbsp;A cookies)</span>
@@ -119,16 +119,20 @@
     <b>Step-by-step</b>
     <ol>
       <li><span class="fc">①</span> You click <b>App · U2M (OAuth)</b> → browser hits the FDE app's <code>/oauth/start</code>.</li>
-      <li><span class="fc">②</span> FDE app doesn't call anything — it returns a <code>307</code> telling the browser to go to <b>WS A</b>'s <code>/oidc/v1/authorize</code>, carrying the <code>client_id</code>, <code>redirect_uri</code>, requested <code>scope</code>, a random <code>state</code>, and a PKCE <code>code_challenge</code>.</li>
+      <li><span class="fc">②</span> FDE app calls the SDK's <code>OAuthClient.initiate_consent()</code> — which first fetches WS A's OIDC discovery doc, then builds the <code>client_id</code>, <code>redirect_uri</code>, requested <code>scope</code>, a random <code>state</code>, and a PKCE <code>code_challenge</code> — and returns a <code>307</code> to <code>consent.auth_url</code> (<b>WS A</b>'s <code>/oidc/v1/authorize</code> with those params). The consent (verifier + state) is stashed in a cookie.</li>
       <li><span class="fc">③</span> The <b>browser</b> calls WS A's authorize endpoint. WS A shows login/consent (using the browser's WS-A session), and checks the <code>redirect_uri</code> against the app connection's registered list.</li>
       <li><span class="fc">④</span> WS A redirects the browser back to the FDE app's <code>/oauth/callback</code> with a short-lived <code>code</code> — and <b>only</b> to the pre-registered URL.</li>
       <li><span class="fc">⑤</span> Browser delivers the <code>code</code> to the FDE app.</li>
-      <li><span class="bc">⑥</span> FDE app (server-side) <b>POST</b>s the <code>code</code> + PKCE <code>code_verifier</code> to WS A's <code>/oidc/v1/token</code>.</li>
+      <li><span class="bc">⑥</span> FDE app (server-side) calls <code>Consent.exchange_callback_parameters(...)</code>, which validates <code>state</code> and <b>POST</b>s the <code>code</code> + PKCE <code>code_verifier</code> to WS A's <code>/oidc/v1/token</code>.</li>
       <li><span class="bc">⑦</span> WS A returns a <b>WS-A-issued user access token</b> (<code>iss/aud = WS A</code>).</li>
       <li><span class="bc">⑧</span> FDE app calls the GTM app's <code>/api/gtm-summary</code> with that token.</li>
       <li><span class="bc">⑨</span> Because the token was minted by WS A, WS A accepts it and the GTM app sees the <b>real user</b>.</li>
       <li><span class="fc">⑩</span> FDE app renders the result banner.</li>
     </ol>
+  </div>
+
+  <div class="note" style="background:#eff6ff;border-color:#bfdbfe;color:#1e3a8a">
+    <b>Who does the work:</b> steps ②–⑦ are performed by the Databricks SDK's <code>OAuthClient.initiate_consent()</code> (② — PKCE challenge, state, authorize URL; it first does an <b>OIDC discovery</b> call to WS&nbsp;A) and <code>Consent.exchange_callback_parameters()</code> (⑥–⑦ — state check + token exchange). The app only stores the consent in a cookie and routes the result. The HTTP sequence on the wire is identical to hand-rolling it — the SDK just handles PKCE + token refresh for you.
   </div>
 
   <b>Why this is different from the other two buttons</b>

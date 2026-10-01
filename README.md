@@ -239,8 +239,10 @@ Open the FDE app URL in a browser and click the buttons.
 - **U2M — forward** — reusing the caller's WS-B token fails: its `iss`/`aud` are WS-B, so WS A rejects it.
   User tokens are workspace-scoped; you cannot "forward a user" across workspaces.
 - **U2M — proper OAuth** — the user logs in *to WS A* (authz-code + PKCE), so WS A mints the token and sees the
-  real user. Needs the account-level OAuth app connection (Step 6). PKCE `state`/`code_verifier` are stored in a
-  cookie (not server memory) so the flow survives app restarts / multiple replicas.
+  real user. Needs the account-level OAuth app connection (Step 6). The FDE app drives the flow with the Databricks
+  SDK's `OAuthClient`/`Consent` helper (`initiate_consent()` → redirect, `exchange_callback_parameters()` → token),
+  so PKCE + token refresh are handled for us; the wire flow is unchanged (see `oauth-flow-diagram.html`). The consent
+  (`state`/`code_verifier`) is stored in a cookie (not server memory) so the flow survives app restarts / multiple replicas.
 - **A2A** — the GTM agent publishes an **Agent Card** at `/.well-known/agent.json` (name, skills, `securitySchemes`,
   and its `url`) and serves **JSON-RPC `message/send`** at `/a2a`, returning a **Task** with an **Artifact**.
   The client discovers the card then calls it — the *protocol* is identical whether it authenticates as the SP
